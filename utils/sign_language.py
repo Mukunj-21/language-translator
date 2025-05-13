@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from transformers import AutoFeatureExtractor, AutoModelForImageClassification
 import os
-from safetensors.torch import load_file
+import mediapipe as mp
 
 class SignLanguageTranslator:
     def __init__(self, model_path="models/sign_language_model"):
@@ -13,32 +13,31 @@ class SignLanguageTranslator:
         Args:
             model_path: Path to the local model. If None, will download from HuggingFace.
         """
-        if model_path and os.path.exists(model_path):
-            self.feature_extractor = AutoFeatureExtractor.from_pretrained(model_path)
-            # self.model = AutoModelForImageClassification.from_pretrained(model_path)
-            model_name_or_config = AutoModelForImageClassification.from_pretrained(
-            model_path,
-            local_files_only=True,
-            torch_dtype=torch.float32,
-            # safetensors=True
-            )
-            self.model = model_name_or_config
-        else:
-            # Use the HuggingFace model
-            model_name = "Heem2/sign-language-classification"
-            self.feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
-            # self.model = AutoModelForImageClassification.from_pretrained(model_name)
-            model_name_or_config = AutoModelForImageClassification.from_pretrained(
-            model_path,
-            local_files_only=True,
-            torch_dtype=torch.float32,
-            safetensors=True
-        )
-        self.model = model_name_or_config
-        
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model.to(self.device)
-        self.model.eval()
+        try:
+            # Try to load local model first
+            if model_path and os.path.exists(model_path):
+                print(f"Loading model from local path: {model_path}")
+                self.feature_extractor = AutoFeatureExtractor.from_pretrained(model_path)
+                self.model = AutoModelForImageClassification.from_pretrained(
+                    model_path,
+                    local_files_only=True,
+                    torch_dtype=torch.float32
+                )
+            else:
+                # Fall back to HuggingFace model
+                print("Local model not found, downloading from HuggingFace")
+                model_name = "Heem2/sign-language-classification"
+                self.feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
+                self.model = AutoModelForImageClassification.from_pretrained(model_name)
+            
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            print(f"Using device: {self.device}")
+            self.model.to(self.device)
+            self.model.eval()
+            
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            raise
         
         # Map of indices to letters/signs
         self.idx_to_label = {
@@ -49,27 +48,31 @@ class SignLanguageTranslator:
             24: 'Y', 25: 'Z'
         }
         
-        # Initialize hand detection
-        self.hand_detector = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_hand.xml')
-        if self.hand_detector.empty():
-            # Fallback to MediaPipe hands if available
-            try:
-                import mediapipe as mp
-                self.mp_hands = mp.solutions.hands
-                self.hands = self.mp_hands.Hands(
-                    static_image_mode=False,
-                    max_num_hands=2,
-                    min_detection_confidence=0.5
-                )
-                self.using_mediapipe = True
-            except ImportError:
-                print("Warning: Neither OpenCV hand cascade nor MediaPipe is available.")
-                self.using_mediapipe = False
-        else:
-            self.using_mediapipe = False
+        # Initialize MediaPipe hands for reliable hand detection
+        try:
+            self.mp_hands = mp.solutions.hands
+            self.hands = self.mp_hands.Hands(
+                static_image_mode=False,
+                max_num_hands=1,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            self.mp_drawing = mp.solutions.drawing_utils
+            print("MediaPipe hands initialized successfully")
+        except ImportError:
+            print("Warning: MediaPipe not available. Hand detection may be less accurate.")
+            self.mp_hands = None
         
         # Frame skip rate for video processing
         self.frame_skip = 5
+        
+        # Detection confidence threshold
+        self.confidence_threshold = 0.6
+        
+        # For gesture recognition
+        self.thumb_up_frames = 0
+        self.open_palm_frames = 0
+        self.required_frames = 3  # Number of consecutive frames to confirm a gesture
     
     def preprocess_frame(self, frame):
         """Preprocess the frame for the model."""
@@ -91,7 +94,7 @@ class SignLanguageTranslator:
     
     def detect_hand(self, frame):
         """Detect hand in the frame and return the hand region."""
-        if self.using_mediapipe:
+        if self.mp_hands is not None:
             # Use MediaPipe for hand detection
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self.hands.process(frame_rgb)
@@ -119,10 +122,25 @@ class SignLanguageTranslator:
                 x_max = min(w, x_max + padding)
                 y_max = min(h, y_max + padding)
                 
-                return frame[y_min:y_max, x_min:x_max]
+                # Draw landmarks on a copy of the frame for debugging
+                debug_frame = frame.copy()
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                self.mp_drawing.draw_landmarks(
+                    debug_frame, 
+                    hand_landmarks, 
+                    self.mp_hands.HAND_CONNECTIONS
+                )
+                
+                # Save or display the debug frame if needed
+                # cv2.imwrite("debug_hand.jpg", debug_frame)
+                
+                # Extract the hand region
+                hand_region = frame[y_min:y_max, x_min:x_max]
+                return hand_region, debug_frame
+            
+            return None, frame
         else:
-            # Try basic color-based segmentation for hand detection
-            # Convert to HSV color space
+            # Fallback to skin color segmentation if MediaPipe not available
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             
             # Define range for skin color in HSV
@@ -132,6 +150,11 @@ class SignLanguageTranslator:
             # Create a binary mask
             mask = cv2.inRange(hsv, lower_skin, upper_skin)
             
+            # Apply morphological operations to clean up the mask
+            kernel = np.ones((5, 5), np.uint8)
+            mask = cv2.dilate(mask, kernel, iterations=2)
+            mask = cv2.erode(mask, kernel, iterations=1)
+            
             # Find contours
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
@@ -139,20 +162,29 @@ class SignLanguageTranslator:
                 # Get the largest contour (presumably the hand)
                 max_contour = max(contours, key=cv2.contourArea)
                 
-                # Get bounding rectangle
-                x, y, w, h = cv2.boundingRect(max_contour)
-                
-                # Add padding
-                padding = 20
-                x = max(0, x - padding)
-                y = max(0, y - padding)
-                w = min(frame.shape[1] - x, w + 2*padding)
-                h = min(frame.shape[0] - y, h + 2*padding)
-                
-                return frame[y:y+h, x:x+w]
+                # Only process if contour is large enough
+                if cv2.contourArea(max_contour) > 1000:
+                    # Get bounding rectangle
+                    x, y, w, h = cv2.boundingRect(max_contour)
+                    
+                    # Add padding
+                    padding = 30
+                    x = max(0, x - padding)
+                    y = max(0, y - padding)
+                    w = min(frame.shape[1] - x, w + 2*padding)
+                    h = min(frame.shape[0] - y, h + 2*padding)
+                    
+                    # Extract the hand region
+                    hand_region = frame[y:y+h, x:x+w]
+                    
+                    # Draw the rectangle on a copy of the frame for debugging
+                    debug_frame = frame.copy()
+                    cv2.rectangle(debug_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                    
+                    return hand_region, debug_frame
         
-        # If no hand detected, return the original frame
-        return frame
+        # If no hand detected, return None
+        return None, frame
     
     def process_frame(self, frame):
         """
@@ -165,7 +197,7 @@ class SignLanguageTranslator:
             Detected sign character or None if no confident detection
         """
         # Detect hand in the frame
-        hand_region = self.detect_hand(frame)
+        hand_region, debug_frame = self.detect_hand(frame)
         
         if hand_region is None or hand_region.size == 0:
             return None
@@ -183,7 +215,7 @@ class SignLanguageTranslator:
         confidence = torch.softmax(logits, dim=-1)[0, predicted_class_idx].item()
         
         # Only return prediction if confidence is high enough
-        if confidence > 0.7:  # Adjust threshold as needed
+        if confidence > self.confidence_threshold:
             return self.idx_to_label.get(predicted_class_idx)
         
         return None
@@ -204,6 +236,8 @@ class SignLanguageTranslator:
         
         detected_signs = []
         frame_count = 0
+        confidence_sum = 0
+        confidence_count = 0
         
         while cap.isOpened():
             ret, frame = cap.read()
@@ -216,9 +250,27 @@ class SignLanguageTranslator:
                 continue
             
             # Process the frame
-            sign = self.process_frame(frame)
-            if sign:
+            hand_region, _ = self.detect_hand(frame)
+            if hand_region is None or hand_region.size == 0:
+                continue
+                
+            # Preprocess the frame
+            inputs = self.preprocess_frame(hand_region)
+            
+            # Run inference
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+            
+            # Get prediction
+            logits = outputs.logits
+            predicted_class_idx = logits.argmax(-1).item()
+            confidence = torch.softmax(logits, dim=-1)[0, predicted_class_idx].item()
+            
+            if confidence > self.confidence_threshold:
+                sign = self.idx_to_label.get(predicted_class_idx)
                 detected_signs.append(sign)
+                confidence_sum += confidence
+                confidence_count += 1
         
         cap.release()
         
@@ -230,90 +282,175 @@ class SignLanguageTranslator:
         
         detected_text = ''.join(processed_signs)
         
+        # Calculate average confidence
+        avg_confidence = confidence_sum / confidence_count if confidence_count > 0 else 0
+        
         return {
             "detected_text": detected_text,
-            "confidence": 0.8  # Placeholder, could calculate actual confidence
+            "confidence": avg_confidence
         }
     
     def is_thumb_sign(self, frame):
         """
         Detect if the frame contains a thumb sign (space).
-        This is a simplified implementation and might need refinement.
+        Using MediaPipe for more accurate detection.
         """
-        # Detect hand in the frame
-        hand_region = self.detect_hand(frame)
-        
-        if hand_region is None or hand_region.size == 0:
-            return False
-        
-        # Convert to HSV for better color segmentation
-        hsv = cv2.cvtColor(hand_region, cv2.COLOR_BGR2HSV)
-        
-        # Define range for skin color in HSV
-        lower_skin = np.array([0, 20, 70], dtype=np.uint8)
-        upper_skin = np.array([20, 255, 255], dtype=np.uint8)
-        
-        # Create a binary mask
-        mask = cv2.inRange(hsv, lower_skin, upper_skin)
-        
-        # Find contours
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            return False
-        
-        # Get the largest contour (presumably the hand)
-        max_contour = max(contours, key=cv2.contourArea)
-        
-        # Check the aspect ratio and size of the contour to identify thumb gesture
-        x, y, w, h = cv2.boundingRect(max_contour)
-        aspect_ratio = float(w) / h
-        
-        # A thumb up gesture typically has a low aspect ratio (taller than wide)
-        # This is a simple heuristic and might need adjustment
-        return aspect_ratio < 0.5 and h > w * 2
+        if self.mp_hands is not None:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = self.hands.process(frame_rgb)
+            
+            if not results.multi_hand_landmarks:
+                self.thumb_up_frames = 0
+                return False
+            
+            # Get hand landmarks
+            hand_landmarks = results.multi_hand_landmarks[0].landmark
+            
+            # Check thumb position relative to other fingers
+            thumb_tip = hand_landmarks[self.mp_hands.HandLandmark.THUMB_TIP]
+            thumb_mcp = hand_landmarks[self.mp_hands.HandLandmark.THUMB_MCP]
+            index_mcp = hand_landmarks[self.mp_hands.HandLandmark.INDEX_FINGER_MCP]
+            
+            # Check if thumb is pointing up
+            if thumb_tip.y < thumb_mcp.y and abs(thumb_tip.x - index_mcp.x) < 0.1:
+                self.thumb_up_frames += 1
+                if self.thumb_up_frames >= self.required_frames:
+                    self.thumb_up_frames = 0
+                    return True
+            else:
+                self.thumb_up_frames = 0
+        else:
+            # Fallback method using contour analysis
+            hand_region, _ = self.detect_hand(frame)
+            if hand_region is None or hand_region.size == 0:
+                return False
+                
+            # Convert to HSV for better color segmentation
+            hsv = cv2.cvtColor(hand_region, cv2.COLOR_BGR2HSV)
+            
+            # Define range for skin color in HSV
+            lower_skin = np.array([0, 20, 70], dtype=np.uint8)
+            upper_skin = np.array([20, 255, 255], dtype=np.uint8)
+            
+            # Create a binary mask
+            mask = cv2.inRange(hsv, lower_skin, upper_skin)
+            
+            # Find contours
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if not contours:
+                return False
+            
+            # Get the largest contour (presumably the hand)
+            max_contour = max(contours, key=cv2.contourArea)
+            
+            # Check the aspect ratio and size of the contour to identify thumb gesture
+            x, y, w, h = cv2.boundingRect(max_contour)
+            aspect_ratio = float(w) / h
+            
+            # A thumb up gesture typically has a low aspect ratio (taller than wide)
+            if aspect_ratio < 0.5 and h > w * 2:
+                self.thumb_up_frames += 1
+                if self.thumb_up_frames >= self.required_frames:
+                    self.thumb_up_frames = 0
+                    return True
+            else:
+                self.thumb_up_frames = 0
+                
+        return False
     
     def is_sentence_complete_sign(self, frame):
         """
-        Detect if the frame contains a sign for sentence completion.
-        For simplicity, we'll use a different gesture (e.g., palm facing camera).
+        Detect if the frame contains a sign for sentence completion (open palm).
+        Using MediaPipe for more accurate detection.
         """
-        # Similar implementation to thumb sign but with different criteria
-        hand_region = self.detect_hand(frame)
-        
-        if hand_region is None or hand_region.size == 0:
-            return False
-        
-        # Convert to HSV for better color segmentation
-        hsv = cv2.cvtColor(hand_region, cv2.COLOR_BGR2HSV)
-        
-        # Define range for skin color in HSV
-        lower_skin = np.array([0, 20, 70], dtype=np.uint8)
-        upper_skin = np.array([20, 255, 255], dtype=np.uint8)
-        
-        # Create a binary mask
-        mask = cv2.inRange(hsv, lower_skin, upper_skin)
-        
-        # Find contours
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            return False
-        
-        # Get the largest contour (presumably the hand)
-        max_contour = max(contours, key=cv2.contourArea)
-        
-        # Calculate convex hull and defects to detect open palm
-        hull = cv2.convexHull(max_contour, returnPoints=False)
-        defects = cv2.convexityDefects(max_contour, hull)
-        
-        # Count number of defects (spaces between fingers)
-        defect_count = 0
-        if defects is not None:
-            for i in range(defects.shape[0]):
-                s, e, f, d = defects[i, 0]
-                if d > 1000:  # distance threshold
-                    defect_count += 1
-        
-        # An open palm typically has 4 significant defects (between 5 fingers)
-        return defect_count >= 4
+        if self.mp_hands is not None:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = self.hands.process(frame_rgb)
+            
+            if not results.multi_hand_landmarks:
+                self.open_palm_frames = 0
+                return False
+            
+            # Get hand landmarks
+            hand_landmarks = results.multi_hand_landmarks[0].landmark
+            
+            # Calculate distances between fingertips and palm
+            palm = hand_landmarks[self.mp_hands.HandLandmark.WRIST]
+            thumb_tip = hand_landmarks[self.mp_hands.HandLandmark.THUMB_TIP]
+            index_tip = hand_landmarks[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
+            middle_tip = hand_landmarks[self.mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
+            ring_tip = hand_landmarks[self.mp_hands.HandLandmark.RING_FINGER_TIP]
+            pinky_tip = hand_landmarks[self.mp_hands.HandLandmark.PINKY_TIP]
+            
+            # Check if all fingers are extended (open palm)
+            fingers_extended = (
+                thumb_tip.y < palm.y and
+                index_tip.y < palm.y and
+                middle_tip.y < palm.y and
+                ring_tip.y < palm.y and
+                pinky_tip.y < palm.y
+            )
+            
+            if fingers_extended:
+                self.open_palm_frames += 1
+                if self.open_palm_frames >= self.required_frames:
+                    self.open_palm_frames = 0
+                    return True
+            else:
+                self.open_palm_frames = 0
+        else:
+            # Fallback to contour analysis
+            hand_region, _ = self.detect_hand(frame)
+            if hand_region is None or hand_region.size == 0:
+                return False
+            
+            # Convert to HSV
+            hsv = cv2.cvtColor(hand_region, cv2.COLOR_BGR2HSV)
+            
+            # Define range for skin color in HSV
+            lower_skin = np.array([0, 20, 70], dtype=np.uint8)
+            upper_skin = np.array([20, 255, 255], dtype=np.uint8)
+            
+            # Create a binary mask
+            mask = cv2.inRange(hsv, lower_skin, upper_skin)
+            
+            # Apply morphological operations
+            kernel = np.ones((5, 5), np.uint8)
+            mask = cv2.dilate(mask, kernel, iterations=2)
+            mask = cv2.erode(mask, kernel, iterations=1)
+            
+            # Find contours
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if not contours:
+                return False
+            
+            # Get the largest contour (presumably the hand)
+            max_contour = max(contours, key=cv2.contourArea)
+            
+            try:
+                # Calculate convex hull and defects to detect open palm
+                hull = cv2.convexHull(max_contour, returnPoints=False)
+                defects = cv2.convexityDefects(max_contour, hull)
+                
+                # Count number of defects (spaces between fingers)
+                defect_count = 0
+                if defects is not None:
+                    for i in range(defects.shape[0]):
+                        s, e, f, d = defects[i, 0]
+                        if d > 10000:  # distance threshold
+                            defect_count += 1
+                
+                # An open palm typically has 4 significant defects (between 5 fingers)
+                if defect_count >= 4:
+                    self.open_palm_frames += 1
+                    if self.open_palm_frames >= self.required_frames:
+                        self.open_palm_frames = 0
+                        return True
+                else:
+                    self.open_palm_frames = 0
+            except:
+                self.open_palm_frames = 0
+                
+        return False
