@@ -1,0 +1,15 @@
+/venv
+/utils/__pycache__/
+/utils/*.pyc
+/utils/*.pyo
+/utils/*.pyd
+/utils/*.pdb
+/utils/*.egg-info
+/utils/*.egg
+/utils/*.whl
+/utils/*.zip
+/utils/*.tar.gz
+/utils/*.tar
+/models
+/.python-version
+/.env

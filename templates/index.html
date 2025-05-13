@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign Language Translator</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Sign Language Translator</h1>
+            <div class="mode-switch">
+                <button id="signModeBtn" class="active">Sign Language Mode</button>
+                <button id="speechModeBtn">Speech Translation Mode</button>
+            </div>
+        </header>
+
+        <!-- Sign Language Translation Section -->
+        <section id="signLanguageSection">
+            <div class="video-container">
+                <video id="videoElement" width="640" height="480" autoplay muted></video>
+                <canvas id="canvasElement" width="640" height="480"></canvas>
+                <div class="controls">
+                    <button id="startCaptureBtn" class="control-btn"><i class="fas fa-play"></i> Start Capture</button>
+                    <button id="stopCaptureBtn" class="control-btn" disabled><i class="fas fa-stop"></i> Stop Capture</button>
+                    <button id="uploadVideoBtn" class="control-btn"><i class="fas fa-upload"></i> Upload Video</button>
+                    <input type="file" id="videoUpload" accept="video/*" style="display: none;">
+                </div>
+            </div>
+            <div class="recognition-display">
+                <div class="current-sign">
+                    <h3>Current Detection:</h3>
+                    <div id="currentSign" class="sign-display"></div>
+                </div>
+                <div class="current-word">
+                    <h3>Current Word:</h3>
+                    <div id="currentWord" class="word-display"></div>
+                </div>
+                <div class="full-sentence">
+                    <h3>Translated Sentence:</h3>
+                    <div id="translatedSentence" class="sentence-display"></div>
+                </div>
+            </div>
+            <div class="translation-options" style="display: none;">
+                <h3>Translate to another language?</h3>
+                <select id="targetLanguage">
+                    {% for code, name in available_languages.items() %}
+                    <option value="{{ code }}">{{ name }}</option>
+                    {% endfor %}
+                </select>
+                <button id="translateBtn">Translate</button>
+            </div>
+            <div class="result-container">
+                <div id="translationResult"></div>
+                <div id="audioPlayer" style="display: none;">
+                    <audio id="audioElement" controls></audio>
+                </div>
+            </div>
+        </section>
+
+        <!-- Speech Translation Section -->
+        <section id="speechSection" style="display: none;">
+            <div class="speech-container">
+                <div class="speech-controls">
+                    <button id="startRecordingBtn" class="control-btn"><i class="fas fa-microphone"></i> Start Recording</button>
+                    <button id="stopRecordingBtn" class="control-btn" disabled><i class="fas fa-microphone-slash"></i> Stop Recording</button>
+                </div>
+                <div class="speech-language">
+                    <h3>Target Language:</h3>
+                    <select id="speechTargetLanguage">
+                        {% for code, name in available_languages.items() %}
+                        <option value="{{ code }}">{{ name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="speech-status">
+                    <p id="recordingStatus">Not recording</p>
+                </div>
+                <div class="speech-result">
+                    <h3>Original Text:</h3>
+                    <div id="originalText" class="text-display"></div>
+                    <h3>Translated Text:</h3>
+                    <div id="translatedText" class="text-display"></div>
+                </div>
+                <div class="speech-audio">
+                    <h3>Translation Audio:</h3>
+                    <audio id="speechAudioElement" controls></audio>
+                </div>
+            </div>
+        </section>
+
+        <div class="instructions">
+            <h2>Instructions</h2>
+            <div class="sign-instructions">
+                <h3>Sign Language Mode:</h3>
+                <ul>
+                    <li>Use hand signs for letters A-Z</li>
+                    <li>Show a thumbs up sign to add a space between words</li>
+                    <li>Show an open palm (all five fingers spread) to complete a sentence</li>
+                    <li>After sentence completion, you can choose to translate to another language</li>
+                </ul>
+            </div>
+            <div class="speech-instructions">
+                <h3>Speech Translation Mode:</h3>
+                <ul>
+                    <li>Click "Start Recording" and speak clearly</li>
+                    <li>Click "Stop Recording" when finished</li>
+                    <li>Select target language for translation</li>
+                    <li>The system will transcribe, translate, and generate audio of your speech</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <p>&copy; 2025 Sign Language Translator</p>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

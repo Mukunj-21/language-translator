@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Video - Sign Language Translator</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Sign Language Translator - Upload Video</h1>
+            <a href="/" class="control-btn" style="display: inline-block; margin-top: 10px;"><i class="fas fa-home"></i> Back to Home</a>
+        </header>
+
+        <section>
+            <div class="upload-container" style="text-align: center; margin: 40px 0;">
+                <h2>Upload Sign Language Video</h2>
+                <form id="uploadForm" enctype="multipart/form-data" style="margin: 20px 0;">
+                    <input type="file" id="videoFile" name="file" accept="video/*" style="display: block; margin: 20px auto;">
+                    <button type="submit" class="control-btn"><i class="fas fa-upload"></i> Upload and Translate</button>
+                </form>
+            </div>
+            
+            <div class="recognition-display">
+                <div class="full-sentence">
+                    <h3>Translation Result:</h3>
+                    <div id="translationResult" class="sentence-display"></div>
+                </div>
+            </div>
+            
+            <div class="translation-options" style="display: none;">
+                <h3>Translate to another language?</h3>
+                <select id="targetLanguage">
+                    {% for code, name in available_languages.items() %}
+                    <option value="{{ code }}">{{ name }}</option>
+                    {% endfor %}
+                </select>
+                <button id="translateBtn">Translate</button>
+            </div>
+            
+            <div class="result-container">
+                <div id="finalTranslation"></div>
+                <div id="audioPlayer" style="display: none;">
+                    <audio id="audioElement" controls></audio>
+                </div>
+            </div>
+        </section>
+
+        <div class="instructions">
+            <h2>Instructions</h2>
+            <ul>
+                <li>Upload a video containing sign language gestures</li>
+                <li>The system will process the video and display the translation</li>
+                <li>You can then choose to translate the result to another language</li>
+            </ul>
+        </div>
+    </div>
+
+    <footer>
+        <p>&copy; 2025 Sign Language Translator</p>
+    </footer>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const uploadForm = document.getElementById('uploadForm');
+            const translationResult = document.getElementById('translationResult');
+            const translationOptions = document.querySelector('.translation-options');
+            const targetLanguage = document.getElementById('targetLanguage');
+            const translateBtn = document.getElementById('translateBtn');
+            const finalTranslation = document.getElementById('finalTranslation');
+            const audioPlayer = document.getElementById('audioPlayer');
+            const audioElement = document.getElementById('audioElement');
+            
+            let detectedText = '';
+            
+            uploadForm.addEventListener('submit', function(e) {
+                e.preventDefault();
+                
+                const formData = new FormData(uploadForm);
+                translationResult.textContent = 'Processing video...';
+                
+                fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        translationResult.textContent = `Error: ${data.error}`;
+                    } else {
+                        translationResult.textContent = data.result.detected_text;
+                        detectedText = data.result.detected_text;
+                        
+                        // Show translation options
+                        translationOptions.style.display = 'block';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error uploading video:', error);
+                    translationResult.textContent = 'Error processing video';
+                });
+            });
+            
+            translateBtn.addEventListener('click', function() {
+                if (!detectedText) {
+                    alert('No text to translate!');
+                    return;
+                }
+                
+                const selectedLanguage = targetLanguage.value;
+                
+                finalTranslation.textContent = `Translating to ${targetLanguage.options[targetLanguage.selectedIndex].text}...`;
+                
+                fetch('/translate_speech', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        audio: null,
+                        text: detectedText,
+                        target_language: selectedLanguage
+                    }),
+                })
+                .then(response => response.json())
+                .then(data => {
+                    finalTranslation.textContent = data.translated_text;
+                    
+                    // Play audio if available
+                    if (data.audio_url) {
+                        audioElement.src = data.audio_url;
+                        audioPlayer.style.display = 'block';
+                        audioElement.play();
+                    }
+                })
+                .catch(error => {
+                    console.error('Error translating text:', error);
+                    finalTranslation.textContent = 'Error translating text';
+                });
+            });
+        });
+    </script>
+</body>
+</html>
